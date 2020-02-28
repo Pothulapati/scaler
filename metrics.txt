@@ -1,0 +1,6 @@
+avg(container_memory_rss{ pod_name=~"web.*", image=~"tarun.*"}/1024/1024)
+
+avg(container_memory_rss{ pod_name=~"vote-bot.*", image=~"tarun.*"}/1024/1024)
+
+
+container_memory_rss{ pod_name=~"web.*", image=~"tarun.*"}/1024/1024

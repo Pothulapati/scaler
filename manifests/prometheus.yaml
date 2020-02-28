@@ -1,0 +1,165 @@
+---
+###
+### Prometheus RBAC
+###
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaler-scaler-prometheus
+  labels:
+    app: prometheus
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "nodes/proxy", "pods"]
+  verbs: ["get", "list", "watch"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaler-scaler-prometheus
+  labels:
+    app: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scaler-scaler-prometheus
+subjects:
+- kind: ServiceAccount
+  name: scaler-prometheus
+  namespace: scaler
+---
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: scaler-prometheus
+  namespace: scaler
+  labels:
+    app: prometheus
+---
+###
+### Prometheus
+###
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: scaler-prometheus-config
+  namespace: scaler
+  labels:
+    app: prometheus
+data:
+  prometheus.yml: |-
+    global:
+      scrape_interval: 2s
+      scrape_timeout: 1s
+      evaluation_interval: 10s
+
+    rule_files:
+    - /etc/prometheus/*_rules.yml
+
+    scrape_configs:
+    - job_name: 'prometheus'
+      static_configs:
+      - targets: ['localhost:9090']
+
+    - job_name: 'kubernetes-nodes-cadvisor'
+      scheme: https
+      tls_config:
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        insecure_skip_verify: true
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+
+      kubernetes_sd_configs:
+      - role: node
+      relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+      metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: '(container|machine)_(cpu|memory|network|fs)_(.+)'
+        action: keep
+      - source_labels: [__name__]
+        regex: 'container_memory_failures_total' # unneeded large metric
+        action: drop
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: scaler-prometheus
+  namespace: scaler
+  labels:
+    app: prometheus
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+  - name: admin-http
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: prometheus
+  name: scaler-prometheus
+  namespace: scaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+        app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      nodeSelector:
+        beta.kubernetes.io/os: linux
+      containers:
+      - args:
+        - --storage.tsdb.path=/data
+        - --storage.tsdb.retention.time=6h
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --log.level=info
+        image: prom/prometheus:v2.15.2
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9090
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+        name: prometheus
+        ports:
+        - containerPort: 9090
+          name: admin-http
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9090
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+        securityContext:
+          runAsUser: 65534
+        volumeMounts:
+        - mountPath: /data
+          name: data
+        - mountPath: /etc/prometheus
+          name: prometheus-config
+          readOnly: true
+      serviceAccountName: scaler-prometheus
+      volumes:
+      - emptyDir: {}
+        name: data
+      - configMap:
+          name: scaler-prometheus-config
+        name: prometheus-config
